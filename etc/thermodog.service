@@ -1,0 +1,13 @@
+[Unit]
+Description=ThermoDog
+After=time-sync.target
+
+[Service]
+ExecStart=/home/pi/thermodog/etc/thermodog-service
+RestartSec=120
+Restart=on-failure
+
+
+[Install]
+WantedBy=multi-user.target
+

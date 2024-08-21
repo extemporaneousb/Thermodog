@@ -1,0 +1,246 @@
+#!/usr/bin/env python
+
+"""Thermodog
+
+Usage:
+   thermodog <config-file>
+   thermodog [-vh]
+             [--outdir=<dirname>]
+             [--log-level=<level>]
+             [--description=<desc>]
+             [--calibration=<ab>]
+             [--log-to-file]
+             [--log-to-topic]
+             [--datalog-freq=<seconds>]
+             [--min-celsius=<degrees-c>]
+             [--max-celsius=<degrees-c>]
+             [--grace-period=<minutes>]
+             [--sensor-monitor=<phone-number>]...
+             [--system-monitor=<phone-number>]...
+             [--topic=<topic-name>]...
+             <channel> <name>
+
+
+Options:
+
+System-wide options
+
+ -h --help                        Show this screen
+ -v --version                     Show version
+ -l, --log-level=<level>          Log at this level [Default: INFO]
+ 
+ -O, --outdir=<dirname>           Write to `dirname` directory; default is stdout
+
+ -S, --system-monitor=<phone>     Receive system alerts; `phone` in '+15555555555' format
+
+Sensor-specific options
+ -D, --description=<desc>         Description of monitor
+
+ -C, --calibration=<ab>           Use calibration data for celsius temperature values [Default: (0,1)]
+
+ --log-to-file                    Write log to local file [Default: False]
+
+ --log-to-topic                   Write measurements to AWS topic [Default: False]
+
+ -F, --datalog-freq=<seconds>     Seconds between logging events [Default: 300]
+
+ -T, --sensor-monitor=<phone>     Receive text messages when monitor is out of range
+
+ --min-celsius=<degrees-c>        Minimum allowed temperature before firing alert
+
+ --max-celsius=<degrees-c>        Maximum allowed temperature before firing alert
+
+ --grace-period=<minutes>         Time allowed outside (min, max) before beginning alerts [Default: 5]
+
+ --topic=<topic-name>             Name of topic that is notified for alerts [Default: thermodog]
+
+Arguments:
+   <channel>                      Number between 1-4 indicating which thermocouple to read.
+
+   <name>                         Name of device being monitored, e.g., 'Moana'
+
+   <config-file>                  If passed configuration file, use this for entire
+                                  parametrization, accepting no command line options.
+
+
+"""
+
+import os
+import sys
+import json
+import time
+import string
+import logging
+import pkg_resources
+import docopt
+import boto3
+
+from thermodog import ThermoDog, SensorFileLogger, \
+    SensorRangeAlarm, SmsAlerter, sanitizeName, CloudWatchHeartbeat
+
+try:
+    __version__ = pkg_resources.get_distribution("thermodog").version
+except:
+    __version__ = "0.0.0"
+
+log = logging.getLogger("thermodog")
+log.setLevel(logging.DEBUG)
+logging.basicConfig(format="%(asctime)-15s|%(levelname)-7s %(message)s")
+
+def processCmdLine(args, argnms, optnms):
+    kva = dict([(a, "<{}>".format(a)) for a in argnms])
+    kva.update(dict([(a, "--{}".format(a)) for a in optnms]))
+    return dict([(n, args[k]) for n,k in kva.items()])
+
+def getwherever(k, d):
+    totry = [k, "--{}".format(k), "<{}>".format(k)]
+    for e in totry:
+        if e in d:
+            return(d[e])
+    return None
+    
+def processArgs(args, get=getwherever):
+    def vwdat(x, t=float, d=None):
+        if x is None:
+            return d
+        else:
+            try:
+                return t(x)
+            except:
+                return d
+
+    def fwt(t, d):
+        return lambda x: vwdat(x, t, d)
+    def fws(d=None):
+        return lambda x: vwdat(x, lambda z: "{}".format(z), d)
+
+    inputExtractor = {
+        "sensors": {
+            "channel":        fwt(int, -1),
+            "name":           fws(),
+            "description":    fws(),
+            "calibration":    fwt(eval, (0,1)),
+            # logging activity
+            "log-to-file":    fwt(bool, False),
+            "log-to-topic":   fwt(bool, False),
+            "datalog-freq":   fwt(float, 60.0),
+            # alarming activity
+            "min-celsius":    fwt(int, -sys.maxint),
+            "max-celsius":    fwt(int, sys.maxint),
+            "grace-period":   fwt(int, 5),
+            "sensor-monitor": fwt(list, list()),
+            "topic-name":     fwt(list, ["thermodog"])
+        },
+        "system": {
+            "outdir":         fws(os.getcwd()),
+            "log-level":      fws("DEBUG"),
+            "system-monitor": fwt(list, list())
+        }
+    }
+    
+    def exvals(xk):
+        xkt = inputExtractor[xk]
+        if xk in args:
+            section = args[xk]
+        else:
+            section = args
+
+        log.debug("{}".format(section))
+        
+        def pdict(d):
+            log.debug("{}".format(d))
+            return dict([(k, t(get(k, d))) for k,t in xkt.items()])
+
+        if isinstance(section, list):
+            return [pdict(x) for x in section]
+        else:
+            return [pdict(section)]
+
+    return dict([(k, exvals(k)) for k in inputExtractor.keys()])
+
+
+if __name__ == "__main__":
+    args = docopt.docopt(__doc__, version=__version__)
+    if args["<config-file>"]:
+        args = json.load(file(args["<config-file>"], 'r'))
+
+    ## check & cast args
+    pargs = processArgs(args)
+    def SO(n):
+        return pargs['system'][0][n]
+    ## set system-level params
+    log.setLevel(SO('log-level'))
+
+    ## emit the parsed result
+    ## log.debug("{}".format(pargs))
+    
+    ## output location
+    basedir = SO("outdir")
+    if not basedir:
+        basedir = os.getcwd()
+    if not os.path.exists(basedir):
+        os.makedirs(basedir)
+    assert(os.path.exists(basedir))
+    
+    ## system monitors
+    alerter = SmsAlerter()
+    salst = SO('system-monitor')
+    for w in salst:
+        log.debug(
+            "Initializing System SMS recipient: {}.".format(w))
+        alerter.addRecipient(w, SmsAlerter.SYS_LIST)
+
+    ## Instantiate singleton ThermoDog w/alerter.
+    thermoDog = ThermoDog(alerter=alerter)
+
+    stoppable = []
+    ## Init the individual sensor monitors.
+    for sencfg in pargs['sensors']:
+        log.debug("{}".format(sencfg))
+        for m in sencfg['sensor-monitor']:
+            log.debug(
+                "Initializing Sensor SMS recipient: {}.".format(m))
+            alerter.addRecipient(m, SmsAlerter.MON_LIST)
+        
+        ## get sensor
+        sensor = thermoDog.sensor(
+            sencfg['channel'], name=sencfg['name'], calibration=sencfg['calibration']
+        )
+        
+        if sencfg['log-to-file']:
+            fname = "{}.tsv".format(sanitizeName(sensor.name))
+            ofile = file(os.path.join(basedir, fname), 'a')
+        else:
+            ofile = sys.stdout
+            
+        ## create and start the logger
+        stoppable.append(
+            SensorFileLogger(sensor, ofile, freq=sencfg['datalog-freq']))
+        ## create and start the monitoring process
+        sra = SensorRangeAlarm(sensor,
+                               minc=sencfg['min-celsius'],
+                               maxc=sencfg['max-celsius'],
+                               graceperiod=sencfg['grace-period'])
+        stoppable.append(sra)
+
+        ## spin up the cloudwatch logging
+        client = boto3.client("sts")
+        acctId = client.get_caller_identity()["Account"]
+        tpactions = ["arn:aws:sns:us-west-2:{}:{}".format(acctId, tpn) for
+                     tpn in sencfg["topic-name"]]
+        log.debug("Posting alerts to: {}".format(tpactions))
+        stoppable.append(
+            CloudWatchHeartbeat(sensor, freq=60).addAlarm(
+                threshold=sra.maxc, alarmActions=tpactions))
+        
+    while True:
+        try:
+            time.sleep(.2)
+        except KeyboardInterrupt:
+            log.debug("{} exiting.".format(__name__))
+            for s in stoppable:
+                s.stop()
+            stoppable = []
+            thermoDog.shutdown()
+            sys.exit(1)
+            

@@ -1,0 +1,11 @@
+etc/arduino/analog-bus/build-uno/
+VE
+build/
+dist/
+temperature-records/
+gas-records/
+thermodog.egg-info/
+cronlog
+*.pyc
+*~
+

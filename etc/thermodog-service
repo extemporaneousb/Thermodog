@@ -1,0 +1,3 @@
+#!/bin/bash
+
+sudo su - pi -c "source /home/pi/thermodog/VE/bin/activate && thermodog /etc/thermodog.json"

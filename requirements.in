@@ -1,0 +1,10 @@
+boto3
+dnspython
+wheel
+docopt
+numpy
+RPi.GPIO
+pytz
+pySerial
+
+

@@ -1,0 +1,35 @@
+{   
+    "system": {
+	"outdir": "/home/pi/thermodog/temperature-records",
+	"log-level": "DEBUG",
+	"system-monitor": ["+"]
+    },
+    "sensors": [
+	{
+	    "channel":        1,
+	    "name":           "tc-1",
+	    "min-celsius":    4,
+	    "max-celsius":    8,
+	    "description":    "Room temperature monitor (1/2).",
+	    "grace-period":   5,
+	    "sensor-monitor": [""],
+	    "datalog-freq":   10,
+	    "calibration":    "(0, 1)",
+	    "log-to-file":    true,
+	    "log-to-topic":   true
+	},
+	{
+	    "channel":        2,
+	    "name":           "tc-2",
+	    "min-celsius":    4,
+	    "max-celsius":    8,
+	    "description":    "Room temperature monitor (2/2).",
+	    "grace-period":   5,
+	    "sensor-monitor": [""],
+	    "datalog-freq":   10,
+	    "calibration":    "(0, 1)",
+	    "log-to-file":    true,
+	    "log-to-topic":   true
+	}
+    ]
+}
